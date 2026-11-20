@@ -1,0 +1,5 @@
+data/
+*.osm.pbf
+__pycache__/
+*.pyc
+.venv/
