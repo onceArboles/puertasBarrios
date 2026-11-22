@@ -9,11 +9,19 @@ Descarga el extracto diario de Geofabrik (`argentina-latest.osm.pbf`), indexa es
 Última corrida sobre Argentina completa: **2,234 accesos en 929 barrios privados**.
 
 ### Archivos generados (`output/`)
-- `output/argentina_accesos.csv` (374 KB) — tabla plana con jurisdicción, barrio, coordenadas y link a Google Maps.
-- `output/argentina_accesos.json` (852 KB) — agrupado por barrio.
-- `output/argentina_accesos.geojson` (1.5 MB) — capa geográfica lista para QGIS o [geojson.io](https://geojson.io).
+- `output/argentina_accesos.csv` — tabla plana con jurisdicción, barrio, rol (`principal` / `alternativo`), coordenadas y link a Google Maps (UTF-8 con BOM para Excel).
+- `output/argentina_accesos.json` — agrupado por barrio.
+- `output/argentina_accesos.geojson` — capa geográfica de **puntos** (puertas de acceso) lista para QGIS o [geojson.io](https://geojson.io).
+- `output/argentina_barrios.geojson` — capa geográfica de **polígonos** (perímetros de barrios privados con superficie y cantidad de accesos).
 
-### Uso
+### Interfaz gráfica interna (`app.py`)
+Visor web en Streamlit para buscar por barrio privado, visualizar polígonos y accesos (`principal` vs. `alternativo`) en el mapa, y exportar la selección filtrada a CSV, Excel (`.xlsx`) o GeoJSON:
+
+```bash
+uv run --with streamlit --with folium --with streamlit-folium --with pandas --with openpyxl streamlit run app.py
+```
+
+### Uso del extractor
 Requiere Python 3.10+, `osmium` y `shapely`:
 
 ```bash

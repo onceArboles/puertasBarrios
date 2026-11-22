@@ -34,7 +34,7 @@ from pathlib import Path
 import osmium
 import shapely.wkb as wkblib
 from shapely import STRtree
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, mapping
 
 GEOFABRIK_ARGENTINA_URL = "https://download.geofabrik.de/south-america/argentina-latest.osm.pbf"
 
@@ -317,7 +317,52 @@ def cluster_entrances(candidates: list[dict], radius_m: float) -> list[dict]:
             }
         )
 
-    merged.sort(key=lambda x: (-x["lat"], x["lon"]))
+    _HIGHWAY_SCORE = {
+        "trunk": 25,
+        "trunk_link": 22,
+        "primary": 25,
+        "primary_link": 22,
+        "secondary": 20,
+        "secondary_link": 18,
+        "tertiary": 15,
+        "tertiary_link": 13,
+        "unclassified": 10,
+        "residential": 10,
+        "living_street": 5,
+        "service": 5,
+        "track": 0,
+    }
+    _MAIN_NAME_RE = re.compile(r"\b(principal|central|main|acceso\s*1|entrada\s*1)\b", re.IGNORECASE)
+    _SEC_NAME_RE = re.compile(
+        r"\b(servicio|proveedores|secundari[oa]|obra|emergencia|alternativ[oa]|trasera)\b",
+        re.IGNORECASE,
+    )
+
+    def _score_entrance(ent: dict) -> tuple:
+        score = 0
+        name = ent.get("nombre_acceso", "")
+        if _MAIN_NAME_RE.search(name):
+            score += 100
+        if _SEC_NAME_RE.search(name):
+            score -= 50
+        if "entrance:main" in ent.get("barrier_tag", ""):
+            score += 40
+        det = ent.get("tipo_deteccion", "")
+        if det == "ambos":
+            score += 30
+        elif det == "tag_explicito":
+            score += 20
+        hw_scores = [_HIGHWAY_SCORE.get(h, 0) for h in ent.get("calle_tipo", "").split(",") if h]
+        if hw_scores:
+            score += max(hw_scores)
+        return (score, -ent["lat"], ent["lon"])
+
+    if merged:
+        best_idx = max(range(len(merged)), key=lambda idx: _score_entrance(merged[idx]))
+        for idx, ent in enumerate(merged):
+            ent["rol_acceso"] = "principal" if idx == best_idx else "alternativo"
+
+    merged.sort(key=lambda x: (0 if x.get("rol_acceso") == "principal" else 1, -x["lat"], x["lon"]))
     return merged
 
 
@@ -462,6 +507,7 @@ def main() -> None:
     results_by_barrio: dict[str, dict] = {}
     flat_rows: list[dict] = []
     geojson_features: list[dict] = []
+    barrio_geojson_features: list[dict] = []
 
     for b_idx, barrio in enumerate(p1.barrios):
         candidates = list(p2.candidates_by_barrio.get(b_idx, []))
@@ -478,15 +524,41 @@ def main() -> None:
         partido = find_admin_name(rep_pt, admin_lookup["6"])
         localidad = find_admin_name(rep_pt, admin_lookup["8"])
 
+        # Superficie aproximada en hectáreas usando conversión métrica en la latitud del barrio
+        lat_rad = math.radians(rep_pt.y)
+        m_per_deg_lat = 111132.92
+        m_per_deg_lon = 111320.0 * max(0.2, math.cos(lat_rad))
+        superficie_ha = round((barrio["geom"].area * m_per_deg_lat * m_per_deg_lon) / 10000.0, 2)
+        osm_url = f"https://www.openstreetmap.org/{barrio['osm_id']}"
+
         barrio_key = f"{barrio['name']} ({barrio['osm_id']})"
         results_by_barrio[barrio_key] = {
             "barrio": barrio["name"],
             "osm_id": barrio["osm_id"],
+            "osm_url": osm_url,
             "provincia": provincia,
             "partido_departamento": partido,
             "localidad": localidad,
+            "superficie_ha": superficie_ha,
             "accesos": entrances,
         }
+
+        barrio_geojson_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(barrio["geom"]),
+                "properties": {
+                    "barrio": barrio["name"],
+                    "osm_id": barrio["osm_id"],
+                    "osm_url": osm_url,
+                    "provincia": provincia,
+                    "partido_departamento": partido,
+                    "localidad": localidad,
+                    "cantidad_accesos": len(entrances),
+                    "superficie_ha": superficie_ha,
+                },
+            }
+        )
 
         for idx, ent in enumerate(entrances, start=1):
             rec = {
@@ -525,6 +597,7 @@ def main() -> None:
     csv_path = args.out_dir / f"{prefix}_accesos.csv"
     json_path = args.out_dir / f"{prefix}_accesos.json"
     geojson_path = args.out_dir / f"{prefix}_accesos.geojson"
+    barrios_geojson_path = args.out_dir / f"{prefix}_barrios.geojson"
 
     fieldnames = [
         "provincia",
@@ -533,6 +606,7 @@ def main() -> None:
         "barrio",
         "osm_id",
         "acceso_num",
+        "rol_acceso",
         "lat",
         "lon",
         "nombre_acceso",
@@ -541,7 +615,7 @@ def main() -> None:
         "calle_tipo",
         "google_maps_url",
     ]
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(flat_rows)
@@ -557,14 +631,23 @@ def main() -> None:
             indent=2,
         )
 
+    with barrios_geojson_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {"type": "FeatureCollection", "features": barrio_geojson_features},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
     elapsed = time.time() - t0
     print(
         f"\nListo en {elapsed:.1f}s! "
         f"Se detectaron {len(flat_rows)} accesos en {len(results_by_barrio)} barrios."
     )
-    print(f"  - CSV:     {csv_path.resolve()}")
-    print(f"  - JSON:    {json_path.resolve()}")
-    print(f"  - GeoJSON: {geojson_path.resolve()}")
+    print(f"  - CSV:             {csv_path.resolve()}")
+    print(f"  - JSON:            {json_path.resolve()}")
+    print(f"  - GeoJSON accesos: {geojson_path.resolve()}")
+    print(f"  - GeoJSON barrios: {barrios_geojson_path.resolve()}")
 
 
 if __name__ == "__main__":
