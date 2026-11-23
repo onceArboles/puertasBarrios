@@ -138,6 +138,22 @@ def download_pbf(url: str, dest: Path, force: bool = False) -> None:
     print(f"Descarga completada: {dest}")
 
 
+FALLBACK_NAME_TAGS = ("name", "official_name", "alt_name", "short_name", "loc_name", "name:es")
+PARENT_NAME_PLACES = {"neighbourhood", "quarter"}
+
+
+def extract_osm_name(tags) -> str:
+    """Extrae el nombre de un elemento OSM probando etiquetas alternativas."""
+    for key in FALLBACK_NAME_TAGS:
+        val = tags.get(key, "")
+        if val:
+            # En OSM alt_name puede tener varios valores separados por ';'
+            cleaned = val.split(";")[0].strip() if key == "alt_name" else val.strip()
+            if cleaned:
+                return cleaned
+    return ""
+
+
 class PolygonAndGateHandler(osmium.SimpleHandler):
     """Pasada 1: extrae polígonos de barrios privados, límites administrativos y nodos de portones."""
 
@@ -145,6 +161,7 @@ class PolygonAndGateHandler(osmium.SimpleHandler):
         super().__init__()
         self.wkb_factory = osmium.geom.WKBFactory()
         self.barrios: list[dict] = []
+        self.named_parent_areas: list[tuple[str, object]] = []
         self.admin_areas: dict[str, list[tuple[str, object]]] = {"4": [], "6": [], "8": []}
         self.gate_nodes: list[dict] = []
 
@@ -170,8 +187,14 @@ class PolygonAndGateHandler(osmium.SimpleHandler):
         gated = is_gated_community(tags)
         admin_lvl = tags.get("admin_level", "")
         is_admin = tags.get("boundary") == "administrative" and admin_lvl in self.admin_areas and "name" in tags
+        osm_name = extract_osm_name(tags)
+        is_named_parent = bool(osm_name) and (
+            gated
+            or tags.get("landuse") == "residential"
+            or tags.get("place") in PARENT_NAME_PLACES
+        )
 
-        if not gated and not is_admin:
+        if not gated and not is_admin and not is_named_parent:
             return
 
         try:
@@ -193,10 +216,14 @@ class PolygonAndGateHandler(osmium.SimpleHandler):
             self.barrios.append(
                 {
                     "osm_id": osm_id,
-                    "name": tags.get("name", f"Sin nombre ({osm_id})"),
+                    "name": osm_name or f"Sin nombre ({osm_id})",
+                    "has_name": bool(osm_name),
                     "geom": geom,
                 }
             )
+
+        if is_named_parent:
+            self.named_parent_areas.append((osm_name, geom))
 
         if is_admin:
             self.admin_areas[admin_lvl].append((tags["name"], geom))
@@ -391,6 +418,36 @@ def find_admin_name(pt: Point, tree_tuple) -> str:
     return sorted(names[int(idx)] for idx in hits)[0]
 
 
+def resolve_missing_barrio_names(
+    barrios: list[dict],
+    named_parent_areas: list[tuple[str, object]],
+) -> int:
+    """Intenta asignar nombre a barrios sin etiqueta usando el polígono contenedor más específico."""
+    if not named_parent_areas:
+        return 0
+
+    unnamed = [b for b in barrios if not b.get("has_name")]
+    if not unnamed:
+        return 0
+
+    parent_names = [name for name, _ in named_parent_areas]
+    parent_geoms = [geom for _, geom in named_parent_areas]
+    parent_tree = STRtree(parent_geoms)
+
+    resolved = 0
+    for b in unnamed:
+        rep_pt = b["geom"].representative_point()
+        hits = parent_tree.query(rep_pt, predicate="within")
+        if len(hits) == 0:
+            continue
+        best_idx = min(hits, key=lambda idx: parent_geoms[int(idx)].area)
+        b["name"] = parent_names[int(best_idx)]
+        b["has_name"] = True
+        resolved += 1
+
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extrae coordenadas de puertas de acceso de barrios privados en toda Argentina."
@@ -449,6 +506,11 @@ def main() -> None:
     if not p1.barrios:
         print("No se encontraron barrios privados.", file=sys.stderr)
         sys.exit(1)
+
+    resolved_names = resolve_missing_barrio_names(p1.barrios, p1.named_parent_areas)
+    p1.named_parent_areas.clear()
+    if resolved_names:
+        print(f"  Nombres heredados de polígonos contenedores: {resolved_names}")
 
     admin_lookup = build_admin_lookup(p1.admin_areas)
 
