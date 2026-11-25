@@ -38,10 +38,54 @@ from shapely.geometry import LineString, Point, mapping
 
 GEOFABRIK_ARGENTINA_URL = "https://download.geofabrik.de/south-america/argentina-latest.osm.pbf"
 
-GATED_NAME_RE = re.compile(
-    r"\b(barrio\s+(privado|cerrado)|country|club\s+de\s+campo|chacras|haras|fincas|estancia)\b",
-    re.IGNORECASE,
-)
+DEFAULT_KEYWORDS_FILE = Path(__file__).parent / "keywords.txt"
+
+DEFAULT_GATED_KEYWORDS = [
+    "barrio privado",
+    "barrio cerrado",
+    "country",
+    "club de campo",
+    "chacras",
+    "haras",
+    "fincas",
+    "estancia",
+]
+
+
+def load_keywords_from_file(path: Path) -> list[str]:
+    """Carga palabras clave desde un archivo .txt (una por línea, ignorando vacías y comentarios #)."""
+    if not path.exists():
+        return list(DEFAULT_GATED_KEYWORDS)
+    keywords: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            cleaned = " ".join(line.strip().split())
+            if cleaned and not cleaned.startswith("#"):
+                keywords.append(cleaned)
+    return keywords or list(DEFAULT_GATED_KEYWORDS)
+
+
+def build_gated_name_regex(
+    extra_keywords: list[str] | None = None,
+    base_keywords: list[str] | None = None,
+) -> re.Pattern:
+    """Construye la regex de detección por nombre combinando los términos base y extras."""
+    raw_base = base_keywords if base_keywords else DEFAULT_GATED_KEYWORDS
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for kw in list(raw_base) + list(extra_keywords or []):
+        cleaned = " ".join(kw.strip().split())
+        if cleaned and cleaned.lower() not in seen:
+            keywords.append(cleaned)
+            seen.add(cleaned.lower())
+    if not keywords:
+        keywords = list(DEFAULT_GATED_KEYWORDS)
+    parts = [r"\s+".join(re.escape(token) for token in kw.split()) for kw in keywords]
+    pattern = r"\b(" + "|".join(parts) + r")\b"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+GATED_NAME_RE = build_gated_name_regex(base_keywords=load_keywords_from_file(DEFAULT_KEYWORDS_FILE))
 
 VEHICULAR_HIGHWAYS = {
     "trunk",
@@ -77,13 +121,13 @@ def approx_deg_tolerance(meters: float, lat: float) -> float:
     return meters / (111320.0 * max(0.2, math.cos(math.radians(lat))))
 
 
-def is_gated_community(tags) -> bool:
+def is_gated_community(tags, name_regex: re.Pattern = GATED_NAME_RE) -> bool:
     """Determina si un área OSM corresponde a un barrio privado."""
     if tags.get("residential") == "gated":
         return True
     if tags.get("landuse") == "residential" and tags.get("access") == "private":
         return True
-    if tags.get("landuse") == "residential" and GATED_NAME_RE.search(tags.get("name", "")):
+    if tags.get("landuse") == "residential" and name_regex.search(tags.get("name", "")):
         return True
     return False
 
@@ -157,8 +201,9 @@ def extract_osm_name(tags) -> str:
 class PolygonAndGateHandler(osmium.SimpleHandler):
     """Pasada 1: extrae polígonos de barrios privados, límites administrativos y nodos de portones."""
 
-    def __init__(self) -> None:
+    def __init__(self, name_regex: re.Pattern = GATED_NAME_RE) -> None:
         super().__init__()
+        self.name_regex = name_regex
         self.wkb_factory = osmium.geom.WKBFactory()
         self.barrios: list[dict] = []
         self.named_parent_areas: list[tuple[str, object]] = []
@@ -184,7 +229,7 @@ class PolygonAndGateHandler(osmium.SimpleHandler):
 
     def area(self, a) -> None:
         tags = a.tags
-        gated = is_gated_community(tags)
+        gated = is_gated_community(tags, self.name_regex)
         admin_lvl = tags.get("admin_level", "")
         is_admin = tags.get("boundary") == "administrative" and admin_lvl in self.admin_areas and "name" in tags
         osm_name = extract_osm_name(tags)
@@ -487,13 +532,29 @@ def main() -> None:
         default=45.0,
         help="Radio en metros para unificar carriles de una misma puerta (default: 45.0)",
     )
+    parser.add_argument(
+        "--keywords-file",
+        type=Path,
+        default=DEFAULT_KEYWORDS_FILE,
+        help="Archivo .txt con palabras clave para buscar en 'name' (default: keywords.txt)",
+    )
+    parser.add_argument(
+        "--extra-keywords",
+        type=str,
+        default="",
+        help="Palabras clave adicionales separadas por coma para buscar en 'name' (ej. 'loteo,urbanizacion')",
+    )
     args = parser.parse_args()
+
+    file_kw = load_keywords_from_file(args.keywords_file)
+    extra_kw = [k.strip() for k in args.extra_keywords.split(",") if k.strip()] if args.extra_keywords else []
+    gated_name_re = build_gated_name_regex(extra_keywords=extra_kw, base_keywords=file_kw)
 
     t0 = time.time()
     download_pbf(GEOFABRIK_ARGENTINA_URL, args.pbf, force=args.force_download)
 
     print("Pasada 1: extrayendo barrios privados, límites administrativos y portones...")
-    p1 = PolygonAndGateHandler()
+    p1 = PolygonAndGateHandler(name_regex=gated_name_re)
     p1.apply_file(str(args.pbf), locations=True, idx="flex_mem")
     print(
         f"  Barrios privados: {len(p1.barrios)} | "

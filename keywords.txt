@@ -1,0 +1,11 @@
+# Palabras clave para detectar barrios privados en OpenStreetMap (landuse=residential + name).
+# Un término por línea (sin distinguir mayúsculas/minúsculas).
+# Las líneas vacías o que comienzan con # se ignoran.
+barrio privado
+barrio cerrado
+country
+club de campo
+chacras
+haras
+fincas
+estancia
