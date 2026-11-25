@@ -44,3 +44,24 @@ uv run --with osmium --with shapely python3 argentina_accesos.py --provincia "Bu
 uv run --with osmium --with shapely python3 argentina_accesos.py --force-download
 ```
 
+---
+
+## Geocodificador por Calle y Altura (`geocoder_engine.py` + `geocoder_server.py`)
+
+Aplicación web y API local para ingresar una dirección (**calle**, **altura** y opcionalmente **localidad/provincia**) y geocodificarla directamente contra el extracto de OpenStreetMap de Geofabrik (`data/argentina-latest.osm.pbf`).
+
+### 1. Construir el índice local SQLite + FTS5
+Indexa direcciones exactas (`addr:housenumber`), vías de interpolación (`addr:interpolation`) y red vial con nombre (`highway=*` + `name=*`):
+
+```bash
+uv run --with osmium --with shapely python3 geocoder_engine.py
+```
+
+Genera `data/argentina_geocoder.db` (si no existe el `.osm.pbf`, lo descarga automáticamente desde Geofabrik).
+
+### 2. Iniciar la aplicación web
+```bash
+uv run --with fastapi --with uvicorn python3 geocoder_server.py --port 8000
+```
+Luego abrí el navegador en `http://localhost:8000` (o consultá el endpoint REST `GET /api/geocode?calle=Av.+Corrientes&altura=1234&localidad=CABA`).
+

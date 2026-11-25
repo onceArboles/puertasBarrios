@@ -1,5 +1,7 @@
 data/
 *.osm.pbf
+*.db
+*.db.tmp
 __pycache__/
 *.pyc
 .venv/
