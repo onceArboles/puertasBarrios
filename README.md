@@ -44,12 +44,3 @@ uv run --with osmium --with shapely python3 argentina_accesos.py --provincia "Bu
 uv run --with osmium --with shapely python3 argentina_accesos.py --force-download
 ```
 
----
-
-## Prototipo inicial (Canning): `canning_accesos.py`
-
-Script liviano que consulta Overpass API para el corredor de Canning (Ruta 58, Ezeiza / Esteban Echeverría) y genera `canning_accesos.csv`, `canning_accesos.json` y `canning_accesos.geojson` (83 accesos en 46 barrios).
-
-```bash
-uv run --with shapely python3 canning_accesos.py
-```
